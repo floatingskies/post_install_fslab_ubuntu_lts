@@ -12,12 +12,12 @@ npm -v # Should print "11.9.0".
 
 echo "Instalando o VSCode via .snap"
 sudo snap refresh
-sudo snap install code
+sudo snap install code --classic
 
 echo "Instalando aplicativos de desenvolvimento via Snap"
 sudo snap refresh
-sudo snap install insomnia
-sudo snap install datagrip
+sudo snap install insomnia --classic
+sudo snap install datagrip --classic
 
 
 echo "Instalando Docker via repositorio Docker oficial"
