@@ -1,0 +1,125 @@
+#cloud-config
+#  Autoinstall Ubuntu 24.04 / 26.04 — FSLab Setup
+#  Compatível com: Ubuntu 24.04 LTS (Noble) e 26.04 LTS (Resolute)
+
+autoinstall:
+  version: 1
+
+  # Localização e teclado
+  locale: pt_BR.UTF-8
+
+  keyboard:
+    layout: br
+    variant: abnt2
+
+  # Fuso horário
+  timezone: America/Porto_Velho
+
+  # Rede — DHCP em todas as interfaces ethernet disponíveis
+  network:
+    version: 2
+    ethernets:
+      any:
+        match:
+          name: "en*"
+        dhcp4: true
+        dhcp6: false
+
+  # Disco — particionamento automático (LVM)
+  storage:
+    layout:
+      name: lvm
+      match:
+        size: largest
+
+  # Usuário principal
+  identity:
+    hostname: Ubuntu-FSLab
+    username: FSLab
+    # Senha: $uportE99  (hash SHA-512 gerado com openssl passwd -6)
+    password: "$6$hzxrElFPPhRqVEbx$NSAeMUcnw40cjz/MbsCCZNKS0MCvJM9KYak0ak.J.9myZzcJiDuqA.BczES0sTtV.hhuej72u3F9.HMpMErZM."
+    realname: FSLab
+
+  # SSH — instala servidor mas desabilita autenticação por senha
+  ssh:
+    install-server: true
+    allow-pw: true
+
+  # Pacotes APT instalados durante o setup
+  packages:
+    # Utilitários essenciais
+    - wget
+    - curl
+    - git
+    - git-lfs
+    - unzip
+    - zip
+    - htop
+    - tree
+    - net-tools
+    - ca-certificates
+    - gnupg
+    - lsb-release
+    - software-properties-common
+    - apt-transport-https
+
+    # Codecs multimídia e suporte a formatos
+    - ubuntu-restricted-extras
+    - ubuntu-restricted-addons
+    - ffmpeg
+    - libavcodec-extra
+    - gstreamer1.0-plugins-bad
+    - gstreamer1.0-plugins-ugly
+    - gstreamer1.0-libav
+
+    # Ferramentas de compilação (dependências de pacotes npm/docker etc.)
+    - build-essential
+    - libssl-dev
+    - libffi-dev
+    - python3-pip
+
+  # Atualização completa do sistema durante a instalação
+  package_update: true
+  package_upgrade: true
+
+  # Snaps — instalados via cloud-init após o boot inicial
+  # Os snaps são instalados no late-commands para garantir que
+  # o snapd esteja totalmente operacional.
+
+  # Comandos tardios (executados no chroot, pós-instalação)
+  late-commands:
+    # Garantir que snapd está instalado e ativo
+    - curtin in-target -- apt-get install -y snapd
+
+    # Aguardar snapd ficar pronto
+    - curtin in-target -- systemctl enable snapd
+    - curtin in-target -- systemctl enable snapd.socket
+
+    # Visual Studio Code
+    - curtin in-target -- snap install code --classic
+
+    # Docker
+    - curtin in-target -- snap install docker
+    # Adicionar usuário FSLab ao grupo docker
+    - curtin in-target -- addgroup --system docker || true
+    - curtin in-target -- adduser FSLab docker
+
+    # Node.js (LTS via snap)
+    - curtin in-target -- snap install node --classic --channel=lts/stable
+
+    # Insomnia
+    - curtin in-target -- snap install insomnia
+
+    # Atualização final do sistema
+    - curtin in-target -- apt-get update
+    - curtin in-target -- apt-get upgrade -y
+    - curtin in-target -- apt-get autoremove -y
+    - curtin in-target -- apt-get autoclean -y
+
+    # Permissões sudo para FSLab (sem senha, opcional)
+    - curtin in-target -- usermod -aG sudo FSLab
+    # Limpar cache apt
+    - curtin in-target -- apt-get clean
+
+  # Reinicialização automática ao fim da instalação
+  shutdown: reboot
