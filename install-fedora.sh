@@ -5,7 +5,10 @@
 # Sem Snap ou Flatpak
 # ==============================================================================
 
+# set -e sozinho mata o script silenciosamente.
+# O trap abaixo intercepta e mostra exatamente onde parou.
 set -e
+trap 'echo -e "\n${RED}[✘ FATAL] Linha $LINENO — comando: ${BASH_COMMAND}${NC}\n" >&2; exit 1' ERR
 
 # Cores para output
 RED='\033[0;31m'
@@ -109,7 +112,9 @@ info "Instalando Visual Studio Code via repositório oficial Microsoft..."
 if command -v code &>/dev/null; then
   warn "VS Code já está instalado. Pulando..."
 else
-  sudo rpm --import https://packages.microsoft.com/keys/microsoft.asc
+  # rpm --import pode falhar se a chave já existir em formato diferente.
+  # Usamos || true para não matar o script com set -e.
+  sudo rpm --import https://packages.microsoft.com/keys/microsoft.asc 2>/dev/null || true
 
   sudo tee /etc/yum.repos.d/vscode.repo > /dev/null <<'EOF'
 [code]
@@ -132,17 +137,19 @@ info "Instalando Insomnia via GitHub Releases..."
 if command -v insomnia &>/dev/null; then
   warn "Insomnia já está instalado. Pulando..."
 else
-  # Obtém a URL do .rpm diretamente dos assets da release latest
   INSOMNIA_URL=$(curl -sL https://api.github.com/repos/Kong/insomnia/releases/latest \
     | jq -r '.assets[] | select(.name | endswith(".rpm")) | .browser_download_url' \
     | head -1)
 
   if [ -z "$INSOMNIA_URL" ]; then
-    # Fallback: constrói a URL pelo tag_name
     INSOMNIA_TAG=$(curl -sL https://api.github.com/repos/Kong/insomnia/releases/latest \
       | jq -r '.tag_name')
     INSOMNIA_VER="${INSOMNIA_TAG#core@}"
     INSOMNIA_URL="https://github.com/Kong/insomnia/releases/download/${INSOMNIA_TAG}/Insomnia.Core-${INSOMNIA_VER}.rpm"
+  fi
+
+  if [ -z "$INSOMNIA_URL" ]; then
+    error "Não foi possível obter URL do Insomnia. Verifique sua conexão."
   fi
 
   info "Baixando Insomnia de: $INSOMNIA_URL"
@@ -162,16 +169,13 @@ TOOLBOX_DIR="$HOME/.local/share/JetBrains/Toolbox/bin"
 if [ -f "$TOOLBOX_DIR/jetbrains-toolbox" ]; then
   warn "JetBrains Toolbox já está instalado. Pulando..."
 else
-  # Dependências necessárias para o Toolbox (AppImage) no Fedora
   sudo "$DNF_BIN" install -y fuse fuse-libs libXtst libX11 libXext libXrender libXi
 
-  # Obtém URL da última versão via API da JetBrains
   TOOLBOX_URL=$(curl -sL "https://data.services.jetbrains.com/products/releases?code=TBA&latest=true&type=release" \
     | jq -r '.TBA[0].downloads.linux.link // empty' 2>/dev/null)
 
   if [ -z "$TOOLBOX_URL" ]; then
     warn "API da JetBrains não retornou URL. Tentando método alternativo..."
-    # Método alternativo: scraping da página de download
     TOOLBOX_URL=$(curl -sL "https://www.jetbrains.com/toolbox-app/download/" \
       | grep -oP 'https://download\.jetbrains\.com/toolbox/jetbrains-toolbox-[^"]+\.tar\.gz' \
       | head -1)
@@ -211,17 +215,20 @@ info "Instalando Docker CE via repositório oficial..."
 if command -v docker &>/dev/null; then
   warn "Docker já está instalado. Pulando..."
 else
-  # Remove versões antigas ou conflitantes (podman-docker, etc.)
   sudo "$DNF_BIN" remove -y \
     docker docker-client docker-client-latest docker-common \
     docker-latest docker-latest-logrotate docker-logrotate docker-selinux \
     docker-engine-selinux docker-engine podman-docker 2>/dev/null || true
 
-  # Adiciona repositório Docker CE
-  sudo "$DNF_BIN" config-manager addrepo --from-repofile=https://download.docker.com/linux/fedora/docker-ce.repo 2>/dev/null \
-    || sudo "$DNF_BIN" config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
+  # DNF5 usa sintaxe diferente para adicionar repo; tentamos a nova primeiro.
+  if sudo "$DNF_BIN" config-manager addrepo --from-repofile=https://download.docker.com/linux/fedora/docker-ce.repo 2>/dev/null; then
+    info "Repositório Docker adicionado via dnf5."
+  else
+    warn "Fallback: adicionando repositório Docker via sintaxe dnf4..."
+    sudo "$DNF_BIN" config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
+  fi
 
-  # DNF5 exige --allowerasure quando há pacotes conflitantes remanescentes
+  # --allowerasure é necessário no dnf5 para resolver conflitos com podman
   sudo "$DNF_BIN" install -y --allowerasure \
     docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
