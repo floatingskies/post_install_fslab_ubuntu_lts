@@ -5,10 +5,9 @@
 # Sem Snap ou Flatpak
 # ==============================================================================
 
-# set -e sozinho mata o script silenciosamente.
-# O trap abaixo intercepta e mostra exatamente onde parou.
 set -e
-trap 'echo -e "\n${RED}[✘ FATAL] Linha $LINENO — comando: ${BASH_COMMAND}${NC}\n" >&2; exit 1' ERR
+# Interceptor de erro que mostra a linha exata antes de fechar
+trap 'echo -e "\n${RED}[✘ FATAL] O script parou na linha $LINENO — comando: ${BASH_COMMAND}${NC}\n" >&2; exit 1' ERR
 
 # Cores para output
 RED='\033[0;31m'
@@ -51,7 +50,7 @@ info "Distro detectada: $PRETTY_NAME"
 DNF_BIN="dnf"
 if dnf --version 2>/dev/null | head -1 | grep -q "dnf5"; then
   DNF5=true
-  info "DNF5 detectado (padrão no Fedora 41+)."
+  info "DNF5 detectado."
 else
   DNF5=false
 fi
@@ -69,7 +68,7 @@ sudo "$DNF_BIN" install -y \
 log "Dependências base instaladas."
 
 # ------------------------------------------------------------------------------
-# 2. NVM + Node.js (via repositório oficial NVM)
+# 2. NVM + Node.js
 # ------------------------------------------------------------------------------
 info "Instalando NVM (Node Version Manager)..."
 export NVM_DIR="$HOME/.nvm"
@@ -105,15 +104,13 @@ fi
 log "NVM configurado no shell."
 
 # ------------------------------------------------------------------------------
-# 3. VS Code (repositório oficial Microsoft RPM)
+# 3. VS Code
 # ------------------------------------------------------------------------------
-info "Instalando Visual Studio Code via repositório oficial Microsoft..."
+info "Instalando Visual Studio Code..."
 
 if command -v code &>/dev/null; then
   warn "VS Code já está instalado. Pulando..."
 else
-  # rpm --import pode falhar se a chave já existir em formato diferente.
-  # Usamos || true para não matar o script com set -e.
   sudo rpm --import https://packages.microsoft.com/keys/microsoft.asc 2>/dev/null || true
 
   sudo tee /etc/yum.repos.d/vscode.repo > /dev/null <<'EOF'
@@ -130,87 +127,106 @@ fi
 log "VS Code instalado."
 
 # ------------------------------------------------------------------------------
-# 4. Insomnia (download direto do GitHub — sem repositório)
+# 4. Insomnia
 # ------------------------------------------------------------------------------
-info "Instalando Insomnia via GitHub Releases..."
+info "Instalando Insomnia..."
 
 if command -v insomnia &>/dev/null; then
   warn "Insomnia já está instalado. Pulando..."
 else
   INSOMNIA_URL=$(curl -sL https://api.github.com/repos/Kong/insomnia/releases/latest \
-    | jq -r '.assets[] | select(.name | endswith(".rpm")) | .browser_download_url' \
+    | jq -r '.assets[] | select(.name | endswith(".rpm")) | .browser_download_url' 2>/dev/null \
     | head -1)
 
   if [ -z "$INSOMNIA_URL" ]; then
-    INSOMNIA_TAG=$(curl -sL https://api.github.com/repos/Kong/insomnia/releases/latest \
-      | jq -r '.tag_name')
+    INSOMNIA_TAG=$(curl -sL https://api.github.com/repos/Kong/insomnia/releases/latest | jq -r '.tag_name')
     INSOMNIA_VER="${INSOMNIA_TAG#core@}"
     INSOMNIA_URL="https://github.com/Kong/insomnia/releases/download/${INSOMNIA_TAG}/Insomnia.Core-${INSOMNIA_VER}.rpm"
   fi
 
   if [ -z "$INSOMNIA_URL" ]; then
-    error "Não foi possível obter URL do Insomnia. Verifique sua conexão."
+    error "Não foi possível obter a URL do Insomnia."
   fi
 
   info "Baixando Insomnia de: $INSOMNIA_URL"
   wget -O /tmp/insomnia.rpm "$INSOMNIA_URL"
   sudo "$DNF_BIN" install -y /tmp/insomnia.rpm
   rm -f /tmp/insomnia.rpm
-  log "Insomnia instalado via .rpm direto."
+  log "Insomnia instalado."
 fi
 
 # ------------------------------------------------------------------------------
-# 5. DataGrip (JetBrains Toolbox — sem Flatpak)
+# 5. DataGrip (JetBrains Toolbox)
+# ATENÇÃO: Este bloco NÃO vai fechar o script se falhar. Ele apenas avisa.
 # ------------------------------------------------------------------------------
-info "Instalando JetBrains Toolbox (para gerenciar DataGrip)..."
+info "Instalando JetBrains Toolbox..."
 
 TOOLBOX_DIR="$HOME/.local/share/JetBrains/Toolbox/bin"
+TOOLBOX_INSTALLED=false
 
 if [ -f "$TOOLBOX_DIR/jetbrains-toolbox" ]; then
   warn "JetBrains Toolbox já está instalado. Pulando..."
+  TOOLBOX_INSTALLED=true
 else
+  # Desativa o set -e temporariamente para garantir que o script continue para o Docker
+  set +e
+  
   sudo "$DNF_BIN" install -y fuse fuse-libs libXtst libX11 libXext libXrender libXi
 
   TOOLBOX_URL=$(curl -sL "https://data.services.jetbrains.com/products/releases?code=TBA&latest=true&type=release" \
     | jq -r '.TBA[0].downloads.linux.link // empty' 2>/dev/null)
 
   if [ -z "$TOOLBOX_URL" ]; then
-    warn "API da JetBrains não retornou URL. Tentando método alternativo..."
     TOOLBOX_URL=$(curl -sL "https://www.jetbrains.com/toolbox-app/download/" \
       | grep -oP 'https://download\.jetbrains\.com/toolbox/jetbrains-toolbox-[^"]+\.tar\.gz' \
       | head -1)
   fi
 
-  if [ -z "$TOOLBOX_URL" ]; then
-    error "Não foi possível obter a URL do JetBrains Toolbox. Instale manualmente em https://www.jetbrains.com/toolbox-app/"
-  fi
-
-  info "Baixando JetBrains Toolbox de: $TOOLBOX_URL"
-  TMPDIR_TOOLBOX=$(mktemp -d)
-  wget -O "$TMPDIR_TOOLBOX/toolbox.tar.gz" "$TOOLBOX_URL"
-  tar -xzf "$TMPDIR_TOOLBOX/toolbox.tar.gz" -C "$TMPDIR_TOOLBOX/"
-
-  TOOLBOX_BIN=$(find "$TMPDIR_TOOLBOX" -name "jetbrains-toolbox" -type f | head -1)
-
-  if [ -z "$TOOLBOX_BIN" ]; then
+  if [ -n "$TOOLBOX_URL" ]; then
+    info "Baixando Toolbox de: $TOOLBOX_URL"
+    TMPDIR_TOOLBOX=$(mktemp -d)
+    wget -qO "$TMPDIR_TOOLBOX/toolbox.tar.gz" "$TOOLBOX_URL"
+    
+    # Verifica se o arquivo baixado é válido (maior que 5MB)
+    FILESIZE=$(stat -c%s "$TMPDIR_TOOLBOX/toolbox.tar.gz" 2>/dev/null || echo 0)
+    
+    if (( FILESIZE > 5000000 )); then
+      tar -xzf "$TMPDIR_TOOLBOX/toolbox.tar.gz" -C "$TMPDIR_TOOLBOX/" 2>/dev/null
+      
+      # -print -quit evita que o pipe quebre com SIGPIPE
+      TOOLBOX_BIN=$(find "$TMPDIR_TOOLBOX" -name "jetbrains-toolbox" -type f -print -quit 2>/dev/null)
+      
+      if [ -n "$TOOLBOX_BIN" ] && [ -s "$TOOLBOX_BIN" ]; then
+        mkdir -p "$TOOLBOX_DIR"
+        mv "$TOOLBOX_BIN" "$TOOLBOX_DIR/"
+        chmod +x "$TOOLBOX_DIR/jetbrains-toolbox"
+        TOOLBOX_INSTALLED=true
+      fi
+    fi
     rm -rf "$TMPDIR_TOOLBOX"
-    error "Arquivo executável do Toolbox não encontrado no archive."
   fi
-
-  mkdir -p "$TOOLBOX_DIR"
-  mv "$TOOLBOX_BIN" "$TOOLBOX_DIR/"
-  chmod +x "$TOOLBOX_DIR/jetbrains-toolbox"
-  rm -rf "$TMPDIR_TOOLBOX"
+  
+  # Reativa o set -e
+  set -e
 fi
 
-log "JetBrains Toolbox instalado em $TOOLBOX_DIR"
-warn "Abra o JetBrains Toolbox e instale o DataGrip manualmente:"
-warn "  $TOOLBOX_DIR/jetbrains-toolbox"
+if [ "$TOOLBOX_INSTALLED" = true ]; then
+  log "JetBrains Toolbox instalado em $TOOLBOX_DIR"
+  warn "Ao abrir o Toolbox pela PRIMEIRA VEZ, ele criará o ícone no menu de aplicativos."
+  warn "Após abri-lo, use-o para instalar o DataGrip."
+else
+  warn "============================================================="
+  warn "NÃO FOI POSSÍVEL INSTALAR O JETBRAINS TOOLBOX AUTOMATICAMENTE."
+  warn "A API da JetBrains é instável e bloqueou/ignorou o download."
+  warn "============================================================="
+  warn "Instale manualmente acessando: https://www.jetbrains.com/toolbox-app/"
+  warn "O script vai continuar para instalar o Docker..."
+fi
 
 # ------------------------------------------------------------------------------
-# 6. Docker CE (repositório oficial Docker)
+# 6. Docker CE
 # ------------------------------------------------------------------------------
-info "Instalando Docker CE via repositório oficial..."
+info "Instalando Docker CE..."
 
 if command -v docker &>/dev/null; then
   warn "Docker já está instalado. Pulando..."
@@ -220,15 +236,13 @@ else
     docker-latest docker-latest-logrotate docker-logrotate docker-selinux \
     docker-engine-selinux docker-engine podman-docker 2>/dev/null || true
 
-  # DNF5 usa sintaxe diferente para adicionar repo; tentamos a nova primeiro.
   if sudo "$DNF_BIN" config-manager addrepo --from-repofile=https://download.docker.com/linux/fedora/docker-ce.repo 2>/dev/null; then
     info "Repositório Docker adicionado via dnf5."
   else
-    warn "Fallback: adicionando repositório Docker via sintaxe dnf4..."
+    warn "Fallback: adicionando repositório Docker via sintaxe antiga..."
     sudo "$DNF_BIN" config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
   fi
 
-  # --allowerasure é necessário no dnf5 para resolver conflitos com podman
   sudo "$DNF_BIN" install -y --allowerasure \
     docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
@@ -244,7 +258,7 @@ warn "Faça logout e login para que as permissões do grupo 'docker' tenham efei
 # ------------------------------------------------------------------------------
 echo ""
 echo -e "${GREEN}============================================================${NC}"
-echo -e "${GREEN}  Instalação concluída com sucesso! (${PRETTY_NAME})${NC}"
+echo -e "${GREEN}  Instalação concluída! (${PRETTY_NAME})${NC}"
 echo -e "${GREEN}============================================================${NC}"
 echo ""
 echo -e "  ${BLUE}Node.js:${NC}   $(node -v 2>/dev/null || echo 'reinicie o terminal')"
@@ -252,8 +266,12 @@ echo -e "  ${BLUE}NPM:${NC}       $(npm -v 2>/dev/null || echo 'reinicie o termi
 echo -e "  ${BLUE}VS Code:${NC}   $(code --version 2>/dev/null | head -1 || echo 'instalado')"
 echo -e "  ${BLUE}Docker:${NC}    $(docker --version 2>/dev/null || echo 'instalado')"
 echo -e "  ${BLUE}Insomnia:${NC}  $(command -v insomnia &>/dev/null && echo 'instalado' || echo 'verifique')"
-echo -e "  ${BLUE}DataGrip:${NC}  Instale via JetBrains Toolbox"
-echo ""
-echo -e "  ${YELLOW}Toolbox:${NC}   $TOOLBOX_DIR/jetbrains-toolbox"
+
+if [ "$TOOLBOX_INSTALLED" = true ]; then
+  echo -e "  ${BLUE}DataGrip:${NC}  Abra o Toolbox para instalar: $TOOLBOX_DIR/jetbrains-toolbox"
+else
+  echo -e "  ${YELLOW}DataGrip:${NC}  Requer instalação manual do Toolbox (link acima)"
+fi
+
 echo ""
 warn "Reinicie o terminal ou execute: source ~/.bashrc"
