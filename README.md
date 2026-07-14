@@ -1,249 +1,205 @@
-# FSLab — Development Environment Setup
+# FSLab Installer Suite
 
-**Guia de Instalacao para Ambientes Linux**
-Versao 2.0 | Marco 2026 | Infraestrutura e DevOps
+Cross-distro post-install toolkit for FSLab development environments. Replaces
+the previous snap-only `post_install_fslab.sh` with a resilient, idempotent,
+logged, and locked suite of bash scripts that work on **Arch-family**,
+**Fedora/RHEL-family**, and **Ubuntu/Debian-family**.
 
----
+## What gets installed
 
-## Sumario
+| Tool | Source | Notes |
+|------|--------|-------|
+| **NVM + Node.js LTS** | nvm-sh (GitHub) | Pin to v0.40.3, persisted in `~/.bashrc` and `~/.zshrc` |
+| **VS Code** | Microsoft repo (`.deb` / `.rpm` / AUR `visual-studio-code-bin`) | Microsoft build — full Marketplace access |
+| **Insomnia** | Kong/insomnia GitHub Releases | `.deb` / `.rpm` — original APT repo was deprecated |
+| **JetBrains Toolbox** | JetBrains API + direct download fallback | Then install DataGrip via the Toolbox UI |
+| **Docker CE** | Official Docker repo (per-distro) | With `docker-compose-plugin` and `docker-buildx-plugin` |
 
-1. [Visao Geral](#1-visao-geral)
-2. [Ferramentas Instaladas](#2-ferramentas-instaladas)
-3. [Scripts Disponiveis](#3-scripts-disponiveis)
-4. [Estrategia por Ferramenta e Distro](#4-estrategia-por-ferramenta-e-distro)
-5. [Pre-requisitos](#5-pre-requisitos)
-6. [Como Usar](#6-como-usar)
-7. [Comportamento dos Scripts](#7-comportamento-dos-scripts)
-8. [Decisoes Tecnicas](#8-decisoes-tecnicas)
-9. [Correcoes e Historico](#9-correcoes-e-historico)
-10. [Estrutura do Repositorio](#10-estrutura-do-repositorio)
-11. [Observacoes Importantes](#11-observacoes-importantes)
-12. [Suporte e Manutencao](#12-suporte-e-manutencao)
+FSLab post-install additionally configures:
 
----
+- Git global (`init.defaultBranch=main`, `pull.rebase=false`, `core.editor`, aliases) — interactive for `user.name` / `user.email` if not set
+- NPM globals: `pm2`, `typescript`, `ts-node`, `nodemon`, `eslint`, `prettier`, `yo`, `rimraf`, `npm-check-updates`, `tsx`
+- 15 VS Code extensions (ESLint, Prettier, GitLens, Docker, Remote-SSH, Remote-Containers, Jest, Playwright, YAML, …)
+- Workspace directories: `~/fslab/{projects,tools,docs,scripts,configs,downloads}`
+- SSH ed25519 key (with `~/.ssh/config` for GitHub/GitLab)
 
-## 1. Visao Geral
+## Files
 
-Este repositorio centraliza os scripts de provisionamento do ambiente de desenvolvimento padronizado do FSLab. O objetivo e garantir que todos os membros da equipe operem com o mesmo conjunto de ferramentas, versoes e configuracoes, independentemente da distribuicao Linux adotada.
+```
+fslab-installer/
+├── install-arch.sh            # Arch Linux + derivatives (Manjaro, BigLinux, Endeavour, Garuda, CachyOS, Arcolinux, Artix)
+├── install-fedora.sh          # Fedora 42+ and RHEL-family (CentOS Stream, AlmaLinux, Rocky)
+├── install-ubuntu-debian.sh   # Ubuntu / Debian + derivatives (Mint, Pop!_OS, Zorin, Elementary)
+├── post_install_fslab.sh      # Entry point — detects OS, dispatches to installer, runs FSLab post-install
+└── README.md                  # This file
+```
 
-Os scripts utilizam exclusivamente os repositorios e pacotes nativos de cada distribuicao, priorizando canais oficiais dos fornecedores. Gerenciadores universais como Snap e Flatpak sao evitados e acionados somente como ultimo recurso, garantindo maior controle sobre versoes e dependencias.
-
----
-
-## 2. Ferramentas Instaladas
-
-O stack cobre as necessidades de desenvolvimento backend, acesso a banco de dados, testes de API e conteinerizacao:
-
-- **Node.js** — Runtime JavaScript gerenciado via NVM (Node Version Manager), com suporte a multiplas versoes por projeto
-- **Visual Studio Code** — Editor de codigo principal na versao proprietaria Microsoft com Marketplace completo
-- **Insomnia** — Cliente REST/GraphQL para testes de API
-- **DataGrip** — IDE de banco de dados JetBrains, provisionada via JetBrains Toolbox
-- **Docker CE** — Plataforma de conteinerizacao com Docker Compose e Buildx incluidos
-
----
-
-## 3. Scripts Disponiveis
-
-Cada script e destinado a uma familia de distribuicoes especifica. A deteccao da distro e automatica: o script recusa prosseguir caso identifique incompatibilidade com o sistema em execucao.
-
-| Script | Distribuicao alvo | Gerenciador | Fallback |
-|---|---|---|---|
-| `install-ubuntu-debian.sh` | Ubuntu 20.04+ / Debian 11+ | APT | `.deb` direto / JetBrains Toolbox |
-| `install-fedora.sh` | Fedora 37+ | DNF | `.rpm` direto / JetBrains Toolbox |
-| `install-arch.sh` | Arch, Manjaro, BigLinux, EndeavourOS, Garuda | Pacman | AUR via `yay` |
-
-### Distros derivadas suportadas
-
-**Base Debian/Ubuntu:** Pop!_OS, Linux Mint, elementaryOS e demais com `ID_LIKE=ubuntu` ou `ID_LIKE=debian`.
-
-**Base Arch:** Manjaro, BigLinux, EndeavourOS, Garuda, ArcoLinux, Artix, CachyOS e demais com `ID_LIKE=arch`.
-
----
-
-## 4. Estrategia por Ferramenta e Distro
-
-| Ferramenta | Ubuntu / Debian | Fedora | Arch / Manjaro / BigLinux |
-|---|---|---|---|
-| Node.js | NVM (script oficial) | NVM (script oficial) | NVM (script oficial) |
-| VS Code | Repo Microsoft `.deb` | Repo Microsoft `.rpm` | AUR `visual-studio-code-bin` |
-| Insomnia | GitHub Releases `.deb` | GitHub Releases `.rpm` | Pacman -> AUR `insomnia-bin` |
-| DataGrip | JetBrains Toolbox | JetBrains Toolbox | AUR `jetbrains-toolbox` |
-| Docker CE | Repo oficial Docker | Repo oficial Docker | Pacman `docker` (repo extra) |
-
----
-
-## 5. Pre-requisitos
-
-### 5.1 Sistema
-
-- Usuario com privilegios `sudo` configurados
-- Conexao com a internet ativa durante toda a execucao
-- Sistema operacional atualizado antes de iniciar o script
-
-### 5.2 Dependencias Automaticas
-
-Todas as dependencias de sistema necessarias — incluindo `curl`, `wget`, `git`, `gnupg`, `base-devel` e bibliotecas graficas — sao instaladas automaticamente na etapa inicial de cada script. Nenhuma preparacao manual previa e exigida ao desenvolvedor.
-
-### 5.3 Arch / Manjaro / BigLinux — yay
-
-O helper AUR `yay` e instalado automaticamente pelo script caso nao esteja presente. Se `paru` ja estiver instalado, ele sera utilizado no lugar. O processo de compilacao do `yay` requer `git`, `base-devel` e `go`, todos instalados automaticamente.
-
----
-
-## 6. Como Usar
-
-### 6.1 Clone do Repositorio
+## Quick start
 
 ```bash
-git clone https://github.com/fslab/dev-setup.git
-cd dev-setup
+# 1. Make all scripts executable
+chmod +x install-*.sh post_install_fslab.sh
+
+# 2. Run the unified entry point (recommended)
+./post_install_fslab.sh
+
+# Or run the per-OS installer directly
+./install-arch.sh            # on Arch-family
+./install-fedora.sh          # on Fedora/RHEL
+./install-ubuntu-debian.sh   # on Ubuntu/Debian
 ```
 
-### 6.2 Permissao de Execucao
+## Resilience features
+
+Every script in the suite implements:
+
+1. **`set -Eeuo pipefail` + `trap ERR`** — failures show the line number and
+   offending command, never fail silently.
+2. **Idempotency** — re-running the script skips already-installed components
+   (NVM, VS Code, Docker, Insomnia, Toolbox). Safe to re-run after a failure.
+3. **Single sudo authentication** — one password prompt at the start; a
+   background keepalive refreshes the cache every 60s so long operations
+   (AUR builds, Docker pulls) never time out.
+4. **Lock file** in `/tmp/fslab-*.lock` — prevents two concurrent runs from
+   corrupting each other.
+5. **Per-run tmp directory** — `mktemp -d` creates a unique scratch dir,
+   cleaned up via `trap … EXIT` regardless of exit code.
+6. **Logging to `~/.local/share/fslab/logs/`** — every run produces a
+   timestamped log file with `tee` (parallel stdout + file).
+7. **Internet check** before doing anything destructive — two-endpoint
+   fallback (`launchpad.net` / `archlinux.org` / `fedoraproject.org` →
+   `google.com`).
+8. **Color auto-detection** — colors are disabled automatically when stderr
+   is not a TTY, so logs stay clean.
+9. **Architecture detection** — `x86_64` / `aarch64` / `armhf` honored per
+   repo.
+10. **Cascading fallbacks** — each component tries its primary source first
+    (pacman → AUR → manual; apt repo → GitHub Releases → fixed URL).
+11. **Size validation** on downloads — refuses to install files smaller
+    than 5 MB (broken downloads).
+12. **Repo validation** — verifies the Docker repo is actually reachable
+    for the detected `distro+codename` before attempting `apt install`.
+
+## Bug fixes vs. the original scripts
+
+### `install-fedora.sh`
+- **Critical:** the original `trap '… $RED … $NC …' ERR` was registered
+  *before* the color variables were defined, so the trap silently produced
+  empty colors. Fixed by defining colors first, then registering the trap.
+- Added `pipefail` to `set -e` (was missing).
+- Added sudo keepalive (was missing — long DNF operations would re-prompt).
+- Added internet check (was missing).
+- Added support for RHEL-family distros via `ID_LIKE=rhel` (CentOS Stream,
+  AlmaLinux, Rocky).
+- Added DNF5 detection (Fedora 41+ ships `dnf5`).
+- Insomnia now downloads to per-run tmp dir (was `/tmp/insomnia.rpm`,
+  prone to collisions).
+- Download size validation before installing RPM.
+
+### `install-ubuntu-debian.sh`
+- Added `pipefail` to `set -e` (was missing — pipelines could mask failures).
+- Added ERR trap with line number (was missing).
+- Added sudo keepalive (was missing).
+- Added internet check (was missing).
+- Added handling for Debian `sid` / `trixie` / `forky` (no dedicated Docker
+  repo — falls back to `bookworm`).
+- Added size validation on Insomnia download.
+- Added size validation on JetBrains Toolbox download.
+- Idempotency hardened for NVM shell-persistence (no duplicate `# NVM`
+  blocks on re-run).
+- Final summary now includes Toolbox status (was always claimed installed).
+
+### `install-arch.sh`
+- Added ERR trap with line number (was only EXIT trap).
+- Added lock file (was missing).
+- Added architecture detection (was missing).
+- Added size validation on JetBrains Toolbox download.
+- Added detection of Artix (no systemd) — skips `systemctl` calls and prints
+  the correct `rc-service` instructions.
+- NVM version bumped to `v0.40.3`.
+- Insomnia no longer relies solely on AUR — `pacman_or_aur` wrapper tries
+  the official repo first.
+- Idempotency hardened for NVM shell-persistence.
+
+### `post_install_fslab.sh`
+- **Complete rewrite** — the original was a 26-line snap-based script with
+  no error handling, no OS detection, no idempotency, and installed the
+  wrong NVM version (`0.40.4` doesn't exist; the latest is `0.40.3`).
+- New version is a cross-distro **dispatcher + post-install customizer**
+  that works on all three OS families.
+- All apps are installed via the OS-appropriate installer (no Snap, no
+  Flatpak — consistent with the other three scripts).
+- Adds FSLab-specific post-install: Git config, NPM globals, VS Code
+  extensions, workspace dirs, SSH key generation.
+
+## Logs
+
+Every run produces a timestamped log file under:
+
+```
+~/.local/share/fslab/logs/
+├── install-arch-YYYYMMDD-HHMMSS.log
+├── install-fedora-YYYYMMDD-HHMMSS.log
+├── install-ubuntu-debian-YYYYMMDD-HHMMSS.log
+└── post-install-fslab-YYYYMMDD-HHMMSS.log
+```
+
+The path of the log file is printed at the end of every run.
+
+## Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FSLAB_WORKSPACE` | `$HOME/fslab` | Where to create the workspace directory tree |
+
+Example:
 
 ```bash
-chmod +x install-ubuntu-debian.sh install-fedora.sh install-arch.sh
+FSLAB_WORKSPACE=/opt/fslab ./post_install_fslab.sh
 ```
 
-### 6.3 Execucao por Distribuicao
+## Tested distros
 
-**Ubuntu e Debian**
+The installers have been written to handle the following distro IDs and
+`ID_LIKE` values. If your distro isn't listed, the script will print a clear
+error rather than running on the wrong package manager.
 
+| Family | Distros |
+|--------|---------|
+| Arch | `arch`, `manjaro`, `biglinux`, `endeavouros`, `garuda`, `cachyos`, `arcolinux`, `artix` |
+| Fedora/RHEL | `fedora` (42+), `rhel` (9+), `centos`, `almalinux`, `rocky` |
+| Ubuntu/Debian | `ubuntu` (20.04+), `debian` (11+), `linuxmint`, `pop`, `zorin`, `elementary` |
+
+## Troubleshooting
+
+### "Outra instância deste script já está rodando (PID xxx)"
+Either wait for the other run to finish, or remove the lock file:
 ```bash
-./install-ubuntu-debian.sh
+rm /tmp/fslab-install-*.lock /tmp/fslab-post-install.lock
 ```
 
-**Fedora**
-
+### Docker permission denied after install
+The `docker` group membership only takes effect after a fresh login:
 ```bash
-./install-fedora.sh
+# Quick test without logout (NOT recommended for daily use):
+newgrp docker
+docker run --rm hello-world
 ```
 
-**Arch Linux, Manjaro, BigLinux e EndeavourOS**
-
+### VS Code not in PATH after install
+The Microsoft repo installs to `/usr/bin/code` (Linux). If `command -v code`
+fails after install, run:
 ```bash
-./install-arch.sh
+hash -r
+source ~/.bashrc
 ```
 
-### 6.4 Pos-instalacao
+### JetBrains Toolbox didn't install
+The API endpoint sometimes rate-limits. Re-run the script (idempotent —
+will retry the download). Or install manually from
+https://www.jetbrains.com/toolbox-app/ and place the binary at
+`~/.local/share/JetBrains/Toolbox/bin/jetbrains-toolbox`.
 
-Reinicie o terminal ou recarregue o perfil do shell para ativar as variaveis do NVM:
-
-```bash
-source ~/.bashrc   # bash
-source ~/.zshrc    # zsh
-```
-
-O Docker requer logout e login para que as permissoes do grupo `docker` tenham efeito, eliminando a necessidade de `sudo` em comandos subsequentes.
-
-O DataGrip deve ser instalado pelo proprio desenvolvedor atraves da interface grafica do JetBrains Toolbox, que e provisionado automaticamente pelo script.
-
----
-
-## 7. Comportamento dos Scripts
-
-### 7.1 Idempotencia
-
-Todos os scripts verificam a existencia de cada ferramenta antes de iniciar sua instalacao. Caso a ferramenta ja esteja presente, a etapa e ignorada com um aviso informativo. Os scripts podem ser executados multiplas vezes sem causar duplicidades ou erros de estado.
-
-### 7.2 Deteccao de Distribuicao
-
-Cada script le os campos `ID`, `ID_LIKE` e `VERSION_CODENAME` do arquivo `/etc/os-release`. Caso haja incompatibilidade, a execucao e interrompida imediatamente com uma mensagem de erro descritiva.
-
-### 7.3 Hierarquia de Fontes (Fallback)
-
-A ordem de preferencia para cada ferramenta e a seguinte:
-
-1. Repositorio nativo da distribuicao (APT, DNF ou Pacman)
-2. Repositorio oficial do fornecedor da ferramenta
-3. Download direto do pacote binario (`.deb`, `.rpm` ou tarball via GitHub Releases)
-4. AUR exclusivamente no Arch Linux e derivados
-
-### 7.4 Saida e Logs
-
-| Prefixo | Significado |
-|---|---|
-| `[✔]` | Operacao concluida com sucesso |
-| `[!]` | Aviso informativo, execucao continua |
-| `[»]` | Etapa em andamento |
-| `[✘]` | Erro fatal, execucao interrompida |
-
-Um resumo com as versoes instaladas e exibido ao final de cada execucao bem-sucedida.
-
-### 7.5 Sudo Keepalive (Arch)
-
-O script Arch autentica o `sudo` uma unica vez no inicio e renova o cache automaticamente em background a cada 60 segundos. Isso evita timeout de senha durante etapas longas como compilacao de pacotes AUR (`yay`, `visual-studio-code-bin`).
-
----
-
-## 8. Decisoes Tecnicas
-
-### VS Code — `visual-studio-code-bin` no Arch
-
-O pacote `code` disponivel nos repositorios oficiais do Arch e o build open-source (equivalente ao VSCodium). Ele nao inclui as extensoes proprietarias da Microsoft nem acesso completo ao Marketplace oficial. Para o fluxo de desenvolvimento do FSLab, o script instala `visual-studio-code-bin` via AUR — a versao binaria proprietaria identica a distribuida pela Microsoft para outras distros.
-
-Caso o script detecte o build OSS ja instalado, ele remove o pacote `code` e instala a versao correta automaticamente.
-
-### Insomnia — GitHub Releases
-
-O repositorio APT/RPM da Kong (`packages.konghq.com/public/insomnia`) foi descontinuado pela propria Kong e nao recebe mais atualizacoes. A unica fonte oficial atual e o GitHub Releases do repositorio `Kong/insomnia`. O script detecta automaticamente a versao mais recente pela API do GitHub (tag `core@x.x.x`) e monta a URL do pacote correspondente.
-
-### NVM — `set +u` temporario
-
-O NVM usa variaveis internas como `PROVIDED_VERSION` que ficam propositalmente sem valor em determinados fluxos. Com `set -u` (nounset) ativo, o bash encerra o script ao encontrar essas variaveis. O script desativa `nounset` apenas durante o carregamento e uso do NVM, restaurando a flag imediatamente apos.
-
-### Docker — `VERSION_CODENAME`
-
-O campo `VERSION_CODENAME` do `/etc/os-release` e utilizado no lugar de `lsb_release -cs`. Em distros derivadas (Pop!_OS, Linux Mint), `lsb_release -cs` retorna o codename da propria distro, que nao existe no repositorio Docker. `VERSION_CODENAME` sempre contem o codename upstream correto (ex: `noble`, `jammy`).
-
-### JetBrains Toolbox — `mktemp -d`
-
-A extracao do tarball usa um diretorio temporario isolado criado com `mktemp -d` em vez de descompactar direto em `/tmp`. O `find` sobre `/tmp` cruza com diretorios privados do systemd (`systemd-private-*`) que retornam `Permission denied`, o que com `set -e` ativo encerra o script antes de encontrar o binario.
-
----
-
-## 9. Correcoes e Historico
-
-### v2.0 — Marco 2026
-
-- **Arch:** adicionado suporte explicito a Manjaro, BigLinux e EndeavourOS na deteccao de distro
-- **Arch:** VS Code alterado para `visual-studio-code-bin` (AUR) como fonte primaria
-- **Arch:** deteccao e substituicao automatica do build OSS caso ja instalado
-- **Arch:** sudo keepalive em background para evitar timeout durante compilacao AUR
-- **Arch:** atualizacao do keyring (`archlinux-keyring` / `manjaro-keyring`) antes do `pacman -Syu`
-- **Arch:** `set -euo pipefail` com `set +u` seletivo ao redor do NVM
-- **Arch/Ubuntu:** `mktemp -d` para extracao do JetBrains Toolbox, corrigindo falha com diretorios `systemd-private-*` em `/tmp`
-- **Ubuntu:** `sudo mkdir -p /etc/apt/keyrings` adicionado antes da instalacao do VS Code
-- **Ubuntu:** Insomnia migrado do repositorio APT da Kong (descontinuado) para GitHub Releases
-- **Ubuntu:** Docker corrigido para usar `VERSION_CODENAME` e `UPSTREAM_DISTRO` corretos em distros derivadas
-
----
-
-## 10. Estrutura do Repositorio
-
-```
-dev-setup/
-|-- install-ubuntu-debian.sh
-|-- install-fedora.sh
-|-- install-arch.sh
-`-- README.md
-```
-
----
-
-## 11. Observacoes Importantes
-
-- Nao execute os scripts como `root`. Utilize um usuario comum com privilegios `sudo`.
-- O NVM e instalado no perfil do usuario, nao globalmente. Cada membro da equipe deve executar o script individualmente em sua conta.
-- A compilacao de pacotes AUR (`yay`, `visual-studio-code-bin`) pode levar varios minutos dependendo do hardware. Nao interrompa o processo.
-- Licencas de produtos JetBrains (DataGrip) devem ser gerenciadas conforme o acordo de licenciamento vigente no FSLab.
-- Em ambientes com proxy corporativo, configure as variaveis `http_proxy` e `https_proxy` antes de executar os scripts.
-
----
-
-## 12. Suporte e Manutencao
-
-Em caso de falha na execucao ou necessidade de adicionar novas ferramentas ao stack, abra uma issue no repositorio ou entre em contato com o time de Infraestrutura do FSLab.
-
-**Mantenedor:** Time de Infraestrutura e DevOps — FSLab
-**Repositorio:** https://github.com/fslab/dev-setup
+### Re-running after a partial failure
+All four scripts are **idempotent** — re-running is safe and will skip
+already-completed steps. Just run the same command again.

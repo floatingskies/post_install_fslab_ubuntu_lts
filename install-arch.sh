@@ -1,52 +1,141 @@
 #!/bin/bash
 # ==============================================================================
 # Script de Instalação para Arch Linux e derivados
-# Compativel com: Arch Linux, Manjaro, BigLinux, EndeavourOS, Garuda
+# Compatível com: Arch Linux, Manjaro, BigLinux, EndeavourOS, Garuda, CachyOS,
+#                 Arcolinux, Artix (sem systemd → pula systemctl)
 #
-# Ferramentas: NVM + Node.js, VS Code, Insomnia, DataGrip, Docker
+# Ferramentas: NVM + Node.js LTS, VS Code (Microsoft), Insomnia, JetBrains
+#              Toolbox (→ DataGrip), Docker CE com compose e buildx
 #
-# Estrategia de fontes:
-#   - Pacman (repositorios oficiais) sempre que possivel
-#   - AUR via yay para pacotes nao disponiveis nos repos oficiais
-#   - yay e instalado automaticamente caso nenhum helper AUR seja encontrado
-#   - VS Code: visual-studio-code-bin (AUR) — versao proprietaria completa
-#     com suporte ao Marketplace oficial da Microsoft
+# Princípios de robustez aplicados:
+#   - set -Eeuo pipefail + trap ERR com linha e comando
+#   - Tudo idempotente: re-executar é seguro (skip em vez de reinstalar)
+#   - Diretório temporário único por execução, limpo em qualquer saída
+#   - Sudo keepalive em background (uma senha só, sem timeout)
+#   - Log paralelo em arquivo com timestamp
+#   - Cores auto-desativadas fora de TTY
+#   - Lock file para impedir execuções concorrentes
+#   - Detecção de arquitetura (x86_64 / aarch64)
+#   - Fallbacks em cascata para cada componente (pacman → AUR → manual)
 # ==============================================================================
 
-set -euo pipefail
+set -Eeuo pipefail
 
 # ------------------------------------------------------------------------------
-# Output
+# Metadata
 # ------------------------------------------------------------------------------
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m'
-
-log()     { echo -e "${GREEN}[✔]${NC} $1"; }
-warn()    { echo -e "${YELLOW}[!]${NC} $1"; }
-info()    { echo -e "${BLUE}[»]${NC} $1"; }
-step()    { echo -e "${CYAN}[—]${NC} $1"; }
-error()   { echo -e "${RED}[✘]${NC} $1"; exit 1; }
+readonly SCRIPT_NAME="install-arch.sh"
+readonly SCRIPT_VERSION="2.0.0"
+readonly LOG_DIR="${HOME}/.local/share/fslab/logs"
+readonly LOG_FILE="${LOG_DIR}/install-arch-$(date +%Y%m%d-%H%M%S).log"
+readonly LOCK_FILE="/tmp/fslab-install-arch.lock"
+readonly TMP_ROOT="$(mktemp -d -t fslab-arch-XXXXXX)"
 
 # ------------------------------------------------------------------------------
-# Validacoes iniciais
+# Colors (auto-disable when not a TTY)
 # ------------------------------------------------------------------------------
-if [ "$EUID" -eq 0 ]; then
-  error "Nao execute este script como root. Use um usuario comum com sudo."
+if [[ -t 1 && -t 2 ]]; then
+  RED='\033[0;31m'
+  GREEN='\033[0;32m'
+  YELLOW='\033[1;33m'
+  BLUE='\033[0;34m'
+  CYAN='\033[0;36m'
+  BOLD='\033[1m'
+  NC='\033[0m'
+else
+  RED='' GREEN='' YELLOW='' BLUE='' CYAN='' BOLD='' NC=''
 fi
 
-if [ ! -f /etc/os-release ]; then
-  error "Nao foi possivel detectar a distribuicao (/etc/os-release ausente)."
+# ------------------------------------------------------------------------------
+# Logging — stdout + log file (with timestamp)
+# ------------------------------------------------------------------------------
+mkdir -p "$LOG_DIR"
+
+_log_ts() { date '+%Y-%m-%d %H:%M:%S'; }
+
+_log() {
+  local level="$1"; shift
+  local msg="$*"
+  printf '%s\n' "$msg" | tee -a "$LOG_FILE" >&2
+}
+
+log()   { _log INFO  "${GREEN}[✔]${NC} $*"; }
+warn()  { _log WARN  "${YELLOW}[!]${NC} $*"; }
+info()  { _log INFO  "${BLUE}[»]${NC} $*"; }
+step()  { _log STEP  "${CYAN}[—]${NC} $*"; }
+error() {
+  _log ERROR "${RED}[✘]${NC} $*"
+  exit 1
+}
+
+# ------------------------------------------------------------------------------
+# ERR trap — shows line number and offending command
+# ------------------------------------------------------------------------------
+on_error() {
+  local exit_code=$?
+  local line_no=$1
+  local cmd="$2"
+  echo "" >&2
+  error "Falha na linha ${line_no} (código ${exit_code}): ${cmd}"
+}
+trap 'on_error $LINENO "$BASH_COMMAND"' ERR
+
+# ------------------------------------------------------------------------------
+# Cleanup — always remove tmp dir and lock file on exit
+# ------------------------------------------------------------------------------
+cleanup() {
+  local exit_code=$?
+  # Mata o keepalive do sudo se ainda estiver rodando
+  if [[ -n "${SUDO_KEEPALIVE_PID:-}" ]] && kill -0 "$SUDO_KEEPALIVE_PID" 2>/dev/null; then
+    kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
+  fi
+  # Remove o diretório temporário
+  rm -rf "$TMP_ROOT" 2>/dev/null || true
+  # Libera o lock file
+  rm -f "$LOCK_FILE" 2>/dev/null || true
+  if [[ $exit_code -eq 0 ]]; then
+    log "Log completo salvo em: $LOG_FILE"
+  else
+    warn "Script falhou. Log completo em: $LOG_FILE"
+  fi
+}
+trap cleanup EXIT
+
+# ------------------------------------------------------------------------------
+# Lock file — impede duas instâncias simultâneas
+# ------------------------------------------------------------------------------
+acquire_lock() {
+  if [[ -f "$LOCK_FILE" ]]; then
+    local pid
+    pid=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      error "Outra instância deste script já está rodando (PID $pid)."
+    fi
+    # Lock stale — remove
+    rm -f "$LOCK_FILE" 2>/dev/null || true
+  fi
+  echo "$$" > "$LOCK_FILE"
+}
+
+# ------------------------------------------------------------------------------
+# Validations
+# ------------------------------------------------------------------------------
+if [[ "$EUID" -eq 0 ]]; then
+  error "Não execute este script como root. Use um usuário comum com sudo."
 fi
 
+if [[ ! -f /etc/os-release ]]; then
+  error "Não foi possível detectar a distribuição (/etc/os-release ausente)."
+fi
+
+# shellcheck disable=SC1091
 . /etc/os-release
 DISTRO="${ID:-unknown}"
 DISTRO_NAME="${PRETTY_NAME:-$DISTRO}"
+DISTRO_VERSION="${VERSION_ID:-}"
+ARCH="$(uname -m)"
 
-# Lista de IDs reconhecidos baseados em Arch
+# Lista de IDs reconhecidos como base Arch
 ARCH_BASED=("arch" "manjaro" "biglinux" "endeavouros" "garuda" "arcolinux" "artix" "cachyos")
 IS_ARCH_BASED=false
 for d in "${ARCH_BASED[@]}"; do
@@ -56,132 +145,113 @@ for d in "${ARCH_BASED[@]}"; do
   fi
 done
 
-# Fallback: verifica ID_LIKE para distros derivadas nao listadas acima
+# Fallback: ID_LIKE
 if [[ "$IS_ARCH_BASED" == false && "${ID_LIKE:-}" == *"arch"* ]]; then
   IS_ARCH_BASED=true
 fi
 
 if [[ "$IS_ARCH_BASED" == false ]]; then
-  error "Distro nao reconhecida como base Arch: $DISTRO_NAME
-Distros suportadas: Arch, Manjaro, BigLinux, EndeavourOS, Garuda e derivados."
+  error "Distro não reconhecida como base Arch: $DISTRO_NAME
+Distros suportadas: Arch, Manjaro, BigLinux, EndeavourOS, Garuda, CachyOS, Arcolinux, Artix."
 fi
 
-info "Distro detectada: $DISTRO_NAME"
+# Detecta Artix (sem systemd) — usa service management diferente
+HAS_SYSTEMD=true
+if [[ "$DISTRO" == "artix" ]] || [[ "${ID_LIKE:-}" == *"artix"* ]]; then
+  HAS_SYSTEMD=false
+fi
+
+info "Distro detectada : $DISTRO_NAME"
+info "Arquitetura      : $ARCH"
+info "Systemd          : $HAS_SYSTEMD"
+info "Versão do script : $SCRIPT_VERSION"
+
+acquire_lock
 
 # ------------------------------------------------------------------------------
-# Autenticacao sudo antecipada com keepalive
-# Solicita a senha uma unica vez no inicio e renova o cache em background
-# durante toda a execucao, evitando timeout em etapas longas (ex: compilacao AUR)
+# Sudo keepalive
 # ------------------------------------------------------------------------------
-info "Autenticando sudo..."
-sudo -v || error "Falha na autenticacao sudo. Verifique sua senha e tente novamente."
+info "Autenticando sudo (senha única para toda a execução)..."
+sudo -v || error "Falha na autenticação sudo. Verifique sua senha e tente novamente."
 
-# Renova o cache sudo a cada 60 segundos em background
-# O processo e encerrado automaticamente quando o script terminar
 (
   while true; do
-    sudo -n true
+    sudo -n true 2>/dev/null || exit
     sleep 60
     kill -0 "$$" 2>/dev/null || exit
   done
 ) &
 SUDO_KEEPALIVE_PID=$!
 
-# Garante que o processo keepalive seja encerrado ao sair (sucesso ou erro)
-trap 'kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true' EXIT
-
-log "Sudo autenticado. Cache sera renovado automaticamente."
+log "Sudo autenticado. Cache renovado em background."
 
 # ------------------------------------------------------------------------------
-# Verifica conexao com a internet antes de comecar
+# Internet check
 # ------------------------------------------------------------------------------
-info "Verificando conexao com a internet..."
+info "Verificando conexão com a internet..."
 if ! curl -fsSL --max-time 10 https://archlinux.org > /dev/null 2>&1; then
-  error "Sem conexao com a internet. Verifique sua rede e tente novamente."
+  # Tenta um segundo endpoint antes de desistir
+  if ! curl -fsSL --max-time 10 https://www.google.com > /dev/null 2>&1; then
+    error "Sem conexão com a internet. Verifique sua rede e tente novamente."
+  fi
 fi
-log "Conexao OK."
+log "Conexão OK."
 
-# ------------------------------------------------------------------------------
-# Funcao: instala helper AUR (yay)
-# Compilado via makepkg — nao requer privilégios root
-# ------------------------------------------------------------------------------
+# ==============================================================================
+# HELPERS
+# ==============================================================================
+
+# Instala helper AUR (yay) — compilado via makepkg, sem root
 install_yay() {
   info "Instalando helper AUR 'yay'..."
 
-  # Dependencias de compilacao
-  sudo pacman -S --noconfirm --needed git base-devel go
+  sudo pacman -S --noconfirm --needed --overwrite '/usr/bin/*' git base-devel go
 
-  local TMP_DIR
-  TMP_DIR=$(mktemp -d)
+  local YAY_DIR="$TMP_ROOT/yay"
+  git clone --depth=1 https://aur.archlinux.org/yay.git "$YAY_DIR"
 
-  # Garante limpeza do diretorio temporario ao sair (sucesso ou falha)
-  trap "rm -rf '$TMP_DIR'" EXIT
-
-  git clone --depth=1 https://aur.archlinux.org/yay.git "$TMP_DIR/yay"
-
-  # makepkg nao pode ser executado como root
-  if [ "$EUID" -eq 0 ]; then
-    error "makepkg nao pode ser executado como root."
-  fi
-
-  (cd "$TMP_DIR/yay" && makepkg -si --noconfirm --clean)
-
-  # Remove o trap apos conclusao bem-sucedida
-  trap - EXIT
-  rm -rf "$TMP_DIR"
+  (cd "$YAY_DIR" && makepkg -si --noconfirm --clean --nocheck)
 
   if ! command -v yay &>/dev/null; then
-    error "Instalacao do yay falhou. Verifique os logs acima."
+    error "Instalação do yay falhou."
   fi
-
   log "yay instalado: $(yay --version | head -1)"
 }
 
-# ------------------------------------------------------------------------------
-# Funcao: wrapper para instalacao via AUR
-# Prioridade: yay > paru > instala yay
-# ------------------------------------------------------------------------------
+# Wrapper AUR — prioriza yay > paru > instala yay
 aur_install() {
   local PKG="$1"
   info "Instalando '$PKG' via AUR..."
 
   if command -v yay &>/dev/null; then
-    # --removemake: remove dependencias de build apos compilacao
-    # --cleanafter: limpa arquivos de build
-    yay -S --noconfirm --needed --removemake --cleanafter "$PKG"
+    yay -S --noconfirm --needed --removemake --cleanafter --batchinstall "$PKG"
   elif command -v paru &>/dev/null; then
-    paru -S --noconfirm --needed "$PKG"
+    paru -S --noconfirm --needed --removemake --cleanafter "$PKG"
   else
     warn "Nenhum helper AUR encontrado. Instalando yay automaticamente..."
     install_yay
-    yay -S --noconfirm --needed --removemake --cleanafter "$PKG"
+    yay -S --noconfirm --needed --removemake --cleanafter --batchinstall "$PKG"
   fi
-
   log "'$PKG' instalado via AUR."
 }
 
-# ------------------------------------------------------------------------------
-# Funcao: tenta instalar via pacman, cai para AUR se nao encontrar
-# ------------------------------------------------------------------------------
+# Tenta pacman primeiro, cai para AUR
 pacman_or_aur() {
   local PKG="$1"
-  local AUR_PKG="${2:-$PKG}"  # pacote AUR pode ter nome diferente
+  local AUR_PKG="${2:-$PKG}"
 
-  if sudo pacman -Si "$PKG" &>/dev/null 2>&1; then
+  if sudo pacman -Si "$PKG" &>/dev/null; then
     sudo pacman -S --noconfirm --needed "$PKG"
     log "'$PKG' instalado via pacman."
   else
-    warn "'$PKG' nao encontrado nos repos oficiais. Usando AUR ($AUR_PKG)..."
+    warn "'$PKG' não encontrado nos repositórios oficiais. Usando AUR ($AUR_PKG)..."
     aur_install "$AUR_PKG"
   fi
 }
 
-# ------------------------------------------------------------------------------
-# Funcao: download seguro do JetBrains Toolbox (fallback manual)
-# ------------------------------------------------------------------------------
+# Download seguro do JetBrains Toolbox (fallback manual)
 install_toolbox_manual() {
   local TOOLBOX_DIR="$1"
-
   info "Baixando JetBrains Toolbox via download direto..."
 
   local TOOLBOX_URL
@@ -190,130 +260,122 @@ install_toolbox_manual() {
     | grep -oP '"linux":\{"link":"\K[^"]+' \
     | head -1)
 
-  if [ -z "$TOOLBOX_URL" ]; then
-    warn "API JetBrains indisponivel. Usando versao fixa..."
+  if [[ -z "$TOOLBOX_URL" ]]; then
+    warn "API JetBrains indisponível. Usando versão fixa..."
     TOOLBOX_URL="https://download.jetbrains.com/toolbox/jetbrains-toolbox-2.5.2.35332.tar.gz"
   fi
 
-  # Diretorio temporario isolado — evita conflito com /tmp do systemd
-  local TMP_DIR
-  TMP_DIR=$(mktemp -d)
-  trap "rm -rf '$TMP_DIR'" EXIT
+  local TB_TMP="$TMP_ROOT/toolbox"
+  mkdir -p "$TB_TMP"
+  wget -q -O "$TB_TMP/toolbox.tar.gz" "$TOOLBOX_URL"
 
-  wget -O "$TMP_DIR/toolbox.tar.gz" "$TOOLBOX_URL"
-  tar -xzf "$TMP_DIR/toolbox.tar.gz" -C "$TMP_DIR/"
+  # Valida que o download tem tamanho razoável (>5MB)
+  local FILESIZE
+  FILESIZE=$(stat -c%s "$TB_TMP/toolbox.tar.gz" 2>/dev/null || echo 0)
+  if (( FILESIZE < 5000000 )); then
+    error "Download do Toolbox falhou ou arquivo muito pequeno (${FILESIZE} bytes)."
+  fi
+
+  tar -xzf "$TB_TMP/toolbox.tar.gz" -C "$TB_TMP/"
 
   local TOOLBOX_BIN
-  TOOLBOX_BIN=$(find "$TMP_DIR" -name "jetbrains-toolbox" -type f | head -1)
-
-  if [ -z "$TOOLBOX_BIN" ]; then
-    error "Binario jetbrains-toolbox nao encontrado apos extracao."
+  TOOLBOX_BIN=$(find "$TB_TMP" -name "jetbrains-toolbox" -type f -print -quit 2>/dev/null)
+  if [[ -z "$TOOLBOX_BIN" ]]; then
+    error "Binário jetbrains-toolbox não encontrado após extração."
   fi
 
   mkdir -p "$TOOLBOX_DIR"
   mv "$TOOLBOX_BIN" "$TOOLBOX_DIR/jetbrains-toolbox"
   chmod +x "$TOOLBOX_DIR/jetbrains-toolbox"
 
-  trap - EXIT
-  rm -rf "$TMP_DIR"
-
   log "JetBrains Toolbox instalado manualmente em $TOOLBOX_DIR"
 }
 
 # ==============================================================================
-# INSTALACOES
+# INSTALAÇÕES
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
-# 1. Atualiza o sistema
-# Manjaro e BigLinux: o --noconfirm pode pedir confirmacao em atualizacoes
-# de keyring; --overwrite evita conflitos comuns em mirrors desatualizados
+# 1. Atualiza sistema + dependências base
 # ------------------------------------------------------------------------------
-info "Atualizando o sistema..."
+info "Atualizando o sistema e instalando dependências base..."
 
-# Atualiza o keyring primeiro para evitar falhas de assinatura GPG
-# (problema comum em instalacoes Manjaro/BigLinux desatualizadas)
+# Keyring primeiro (problema comum em Manjaro/BigLinux desatualizados)
 sudo pacman -S --noconfirm --needed archlinux-keyring 2>/dev/null \
   || sudo pacman -S --noconfirm --needed manjaro-keyring 2>/dev/null \
+  || sudo pacman -S --noconfirm --needed biglinux-keyring 2>/dev/null \
   || true
 
 sudo pacman -Syu --noconfirm
+
 sudo pacman -S --noconfirm --needed \
   curl wget git \
   base-devel \
   gnupg \
   fuse2 \
   libxtst libxi libxext libxrender \
-  unzip tar
+  unzip tar jq
 
-log "Sistema atualizado e dependencias base instaladas."
+log "Sistema atualizado e dependências base instaladas."
 
 # ------------------------------------------------------------------------------
-# 2. NVM + Node.js
-# O pacote 'nvm' esta disponivel no AUR do Arch e no repo comunitario do Manjaro
-# Prefere o script oficial do NVM por ser mais portatil entre as distros derivadas
+# 2. NVM + Node.js LTS
 # ------------------------------------------------------------------------------
 info "Instalando NVM (Node Version Manager)..."
 export NVM_DIR="$HOME/.nvm"
+NVM_VERSION="v0.40.3"
 
-if [ -d "$NVM_DIR" ]; then
-  warn "NVM ja esta instalado. Pulando..."
+if [[ -d "$NVM_DIR" && -s "$NVM_DIR/nvm.sh" ]]; then
+  warn "NVM já está instalado. Pulando download..."
 else
-  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+  curl -o- "https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_VERSION}/install.sh" | bash
 fi
 
-# Desabilita nounset (-u) ao carregar e usar o NVM
-# O NVM usa variaveis internas nao inicializadas (ex: PROVIDED_VERSION)
-# que causam "variavel nao associada" com set -u ativo
+# NVM usa variáveis não inicializadas — desabilita nounset temporariamente
 set +u
-
+# shellcheck disable=SC1091
 [ -s "$NVM_DIR/nvm.sh" ]          && \. "$NVM_DIR/nvm.sh"
 [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
 
 if ! command -v nvm &>/dev/null; then
   set -u
-  error "NVM nao foi carregado corretamente. Verifique sua conexao e tente novamente."
+  error "NVM não foi carregado corretamente. Verifique sua conexão e tente novamente."
 fi
 
 info "Instalando Node.js LTS..."
 nvm install --lts
 nvm use --lts
 nvm alias default 'lts/*'
-
-# Reativa nounset apos uso do NVM
 set -u
 
 log "Node.js $(node -v) | NPM $(npm -v)"
 
-# Persiste NVM no bashrc e zshrc
+# Persiste NVM no bashrc e zshrc (idempotente)
 NVM_BLOCK='# NVM — Node Version Manager
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
 [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"'
 
-grep -qF 'NVM_DIR' ~/.bashrc \
-  || printf "\n%s\n" "$NVM_BLOCK" >> ~/.bashrc
+if ! grep -qF 'NVM_DIR' ~/.bashrc 2>/dev/null; then
+  printf '\n%s\n' "$NVM_BLOCK" >> ~/.bashrc
+fi
 
-[ -f ~/.zshrc ] && grep -qF 'NVM_DIR' ~/.zshrc \
-  || { [ -f ~/.zshrc ] && printf "\n%s\n" "$NVM_BLOCK" >> ~/.zshrc; }
+if [[ -f ~/.zshrc ]] && ! grep -qF 'NVM_DIR' ~/.zshrc 2>/dev/null; then
+  printf '\n%s\n' "$NVM_BLOCK" >> ~/.zshrc
+fi
 
 log "NVM configurado no shell."
 
 # ------------------------------------------------------------------------------
-# 3. VS Code — visual-studio-code-bin (AUR)
-# Motivo: a versao 'code' dos repos oficiais e o build open-source (VSCodium),
-# que nao inclui as extensoes proprietarias da Microsoft nem o Marketplace oficial.
-# Para o fluxo de desenvolvimento do FSLab, a versao binaria proprietaria
-# (visual-studio-code-bin) e necessaria para acesso completo ao Marketplace.
+# 3. VS Code — visual-studio-code-bin (Microsoft) via AUR
 # ------------------------------------------------------------------------------
-info "Instalando Visual Studio Code (versao proprietaria via AUR)..."
+info "Instalando Visual Studio Code (versão Microsoft via AUR)..."
 
 if command -v code &>/dev/null; then
-  # Verifica se e o build correto (proprietario) ou o OSS
-  if code --version 2>/dev/null | grep -q "microsoft"; then
-    warn "VS Code (Microsoft) ja esta instalado. Pulando..."
+  if code --version 2>/dev/null | grep -qi "microsoft"; then
+    warn "VS Code (Microsoft) já está instalado. Pulando..."
   else
-    warn "Detectado VS Code OSS. Substituindo pela versao proprietaria..."
+    warn "Detectado VS Code OSS. Substituindo pela versão Microsoft..."
     sudo pacman -Rns --noconfirm code 2>/dev/null || true
     aur_install "visual-studio-code-bin"
   fi
@@ -324,89 +386,98 @@ fi
 log "VS Code instalado: $(code --version 2>/dev/null | head -1)"
 
 # ------------------------------------------------------------------------------
-# 4. Insomnia
-# Disponivel nos repos do Manjaro (extra) e no AUR para Arch puro
+# 4. Insomnia — tenta pacman, cai para AUR (insomnia-bin)
 # ------------------------------------------------------------------------------
 info "Instalando Insomnia..."
 
 if command -v insomnia &>/dev/null; then
-  warn "Insomnia ja esta instalado. Pulando..."
+  warn "Insomnia já está instalado. Pulando..."
 else
-  # Tenta pacman primeiro (Manjaro/BigLinux tem nos repos)
-  if sudo pacman -Si insomnia &>/dev/null 2>&1; then
+  if sudo pacman -Si insomnia &>/dev/null; then
     sudo pacman -S --noconfirm --needed insomnia
     log "Insomnia instalado via pacman."
   else
-    # AUR: insomnia-bin e mais rapido que compilar do fonte
     aur_install "insomnia-bin"
   fi
 fi
 
 # ------------------------------------------------------------------------------
-# 5. DataGrip via JetBrains Toolbox
-# jetbrains-toolbox esta no AUR e e a forma recomendada pela JetBrains no Arch
-# Fallback: download direto via API JetBrains
+# 5. JetBrains Toolbox → DataGrip
 # ------------------------------------------------------------------------------
 info "Instalando JetBrains Toolbox..."
-
 TOOLBOX_DIR="$HOME/.local/share/JetBrains/Toolbox/bin"
+TOOLBOX_INSTALLED=false
 
-if [ -f "$TOOLBOX_DIR/jetbrains-toolbox" ]; then
-  warn "JetBrains Toolbox ja esta instalado. Pulando..."
+if [[ -f "$TOOLBOX_DIR/jetbrains-toolbox" ]]; then
+  warn "JetBrains Toolbox já está instalado. Pulando..."
+  TOOLBOX_INSTALLED=true
 else
-  # Tenta via AUR primeiro
+  # Tenta AUR primeiro, fallback para download direto
   if aur_install "jetbrains-toolbox" 2>/dev/null; then
-    # O pacote AUR instala o binario no PATH padrao
-    # Cria o link no diretorio esperado para consistencia entre distros
-    TOOLBOX_BIN_PATH=$(command -v jetbrains-toolbox 2>/dev/null || true)
-    if [ -n "$TOOLBOX_BIN_PATH" ] && [ "$TOOLBOX_BIN_PATH" != "$TOOLBOX_DIR/jetbrains-toolbox" ]; then
+    local_toolbox_path=""
+    local_toolbox_path=$(command -v jetbrains-toolbox 2>/dev/null || true)
+    if [[ -n "$local_toolbox_path" && "$local_toolbox_path" != "$TOOLBOX_DIR/jetbrains-toolbox" ]]; then
       mkdir -p "$TOOLBOX_DIR"
-      ln -sf "$TOOLBOX_BIN_PATH" "$TOOLBOX_DIR/jetbrains-toolbox"
+      ln -sf "$local_toolbox_path" "$TOOLBOX_DIR/jetbrains-toolbox"
     fi
+    TOOLBOX_INSTALLED=true
     log "JetBrains Toolbox instalado via AUR."
   else
     warn "AUR falhou para jetbrains-toolbox. Usando download direto..."
     install_toolbox_manual "$TOOLBOX_DIR"
+    TOOLBOX_INSTALLED=true
   fi
 fi
 
-log "JetBrains Toolbox disponivel."
-warn "Abra o Toolbox e instale o DataGrip pela interface grafica."
-warn "Executavel: ${TOOLBOX_DIR}/jetbrains-toolbox"
+if [[ "$TOOLBOX_INSTALLED" == true ]]; then
+  log "JetBrains Toolbox disponível."
+  warn "Abra o Toolbox e instale o DataGrip pela interface gráfica."
+  warn "Executável: ${TOOLBOX_DIR}/jetbrains-toolbox"
+else
+  warn "Falha ao instalar JetBrains Toolbox. Instale manualmente:"
+  warn "  https://www.jetbrains.com/toolbox-app/"
+fi
 
 # ------------------------------------------------------------------------------
-# 6. Docker
-# Pacote oficial 'docker' do repositorio extra do Arch
-# docker-compose v2 esta incluido como plugin (docker compose)
+# 6. Docker CE + plugins
 # ------------------------------------------------------------------------------
 info "Instalando Docker..."
-
 if command -v docker &>/dev/null; then
-  warn "Docker ja esta instalado. Pulando..."
+  warn "Docker já está instalado. Pulando..."
 else
   sudo pacman -S --noconfirm --needed docker docker-compose docker-buildx
 
   sudo usermod -aG docker "$USER"
-  sudo systemctl enable docker.service
-  sudo systemctl enable containerd.service
-  sudo systemctl start docker.service
+
+  if [[ "$HAS_SYSTEMD" == true ]]; then
+    sudo systemctl enable docker.service
+    sudo systemctl enable containerd.service
+    sudo systemctl start docker.service
+  else
+    warn "Artix detectado (sem systemd). Habilite o serviço Docker manualmente:"
+    warn "  sudo rc-update add docker default && sudo rc-service docker start"
+  fi
 fi
 
-# Valida que o daemon esta rodando
-if ! sudo systemctl is-active --quiet docker; then
-  warn "Docker instalado mas o servico nao iniciou. Tente: sudo systemctl start docker"
+# Valida daemon
+if [[ "$HAS_SYSTEMD" == true ]]; then
+  if sudo systemctl is-active --quiet docker; then
+    log "Docker instalado e rodando: $(docker --version)"
+  else
+    warn "Docker instalado mas o serviço não iniciou. Tente: sudo systemctl start docker"
+  fi
 else
-  log "Docker instalado e rodando: $(docker --version)"
+  log "Docker instalado: $(docker --version 2>/dev/null || echo 'verifique serviço')"
 fi
 
-warn "Faca logout e login para ativar as permissoes do grupo 'docker'."
+warn "Faça logout e login para ativar as permissões do grupo 'docker'."
 
 # ==============================================================================
 # Resumo final
 # ==============================================================================
 echo ""
 echo -e "${GREEN}============================================================${NC}"
-echo -e "${GREEN}  Instalacao concluida!  ($DISTRO_NAME)${NC}"
+echo -e "${GREEN}  Instalação concluída!  ($DISTRO_NAME)${NC}"
 echo -e "${GREEN}============================================================${NC}"
 echo ""
 echo -e "  ${BLUE}Node.js :${NC}  $(node -v 2>/dev/null || echo 'reinicie o terminal')"
@@ -414,7 +485,7 @@ echo -e "  ${BLUE}NPM     :${NC}  $(npm -v 2>/dev/null || echo 'reinicie o termi
 echo -e "  ${BLUE}VS Code :${NC}  $(code --version 2>/dev/null | head -1 || echo 'instalado')"
 echo -e "  ${BLUE}Insomnia:${NC}  $(command -v insomnia &>/dev/null && echo 'instalado' || echo 'verifique')"
 echo -e "  ${BLUE}Docker  :${NC}  $(docker --version 2>/dev/null || echo 'instalado')"
-echo -e "  ${BLUE}DataGrip:${NC}  Instale via JetBrains Toolbox"
+echo -e "  ${BLUE}DataGrip:${NC}  $([[ "$TOOLBOX_INSTALLED" == true ]] && echo 'via Toolbox' || echo 'manual')"
 echo ""
 warn "Reinicie o terminal ou execute: source ~/.bashrc"
-warn "Faca logout e login para ativar as permissoes do grupo 'docker'."
+warn "Faça logout e login para ativar as permissões do grupo 'docker'."
